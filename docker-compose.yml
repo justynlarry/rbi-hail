@@ -1,0 +1,43 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - internal
+
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - PYTHONPATH=/app/scripts
+      - DB_HOST=db
+    volumes:
+      - ./scripts:/app/scripts
+      - ./reports:/app/reports
+      - ./data:/app/data
+      - ./logs:/app/logs
+    working_dir: /app
+    networks:
+      - internal
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["sleep", "infinity"]
+
+volumes:
+  pgdata:
+
+networks:
+  internal:
+    driver: bridge

@@ -1,0 +1,13 @@
+[Unit]
+Description=Hail Outreach Daily Report Job
+Documentation=https://github.com/justynlarry/hail-outreach
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/rbi-user/hail-outreach
+ExecStart=/usr/bin/docker compose exec -T app python scripts/daily_job.py
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hail-outreach

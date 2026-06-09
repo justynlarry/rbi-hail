@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Hail Outreach Timer — fires at 06:00 local time
+Requires=hail-outreach.service
+
+[Timer]
+OnCalendar=*-*-* 06:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
