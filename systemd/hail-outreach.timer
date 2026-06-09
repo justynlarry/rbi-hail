@@ -1,5 +1,5 @@
 [Unit]
-Description=Weekly Hail Outreach Timer — fires Monday at 12:00 local time
+Description=Hail Outreach Weekly Timer — fires every Monday at 12:00 local time
 Requires=hail-outreach.service
 
 [Timer]

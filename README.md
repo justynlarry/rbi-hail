@@ -1,14 +1,14 @@
 # Hail Outreach Automation
 
-Daily system that queries the RentCast API for active sale listings in zip codes
-affected by hail the previous year, generates a PDF report, and emails it to
-internal recipients.
+Weekly system that queries the RentCast API for active sale listings in zip codes
+affected by hail in the last 365 days, generates a PDF report, and emails it to
+internal recipients every Monday at 12:00.
 
 ---
 
 ## Required `.env` Keys
 
-Create a `.env` file in the project root with these keys (values not shown):
+Copy `.env.example` to `.env` and fill in your values (never commit `.env`):
 
 ```
 POSTGRES_USER=
@@ -22,7 +22,12 @@ SMTP_PASSWORD=
 SMTP_FROM=
 ```
 
-The `.env` file is never committed to git.
+Optional tuning (can be omitted to use defaults):
+
+```
+API_WORKERS=5             # parallel RentCast fetch threads (default: 5)
+REPORT_RETENTION_DAYS=90  # days to keep PDF reports on disk (default: 90)
+```
 
 ---
 
@@ -35,17 +40,17 @@ docker compose up -d --build
 # 2. Initialize the database schema
 docker compose exec app python scripts/init_db.py
 
-# 3. Import last year's hail events
+# 3. Import hail events
 docker compose exec app python scripts/import_hail_events.py data/rbi_hail_events_2025.csv
 
 # 4. Import the do-not-contact list
 docker compose exec app python scripts/import_dnc.py data/rbi_dnc_list.csv
 
-# 5. Add internal email recipients (repeat as needed)
-docker compose exec -it app python scripts/add_dnc.py   # for DNC additions
-# To add internal email recipients, connect to the DB directly:
-docker compose exec db psql -U $POSTGRES_USER -d $POSTGRES_DB \
-  -c "INSERT INTO internal_email (emp_fname, emp_lname, emp_email) VALUES ('First', 'Last', 'email@example.com');"
+# 5. Add internal email recipients (interactive)
+docker compose exec -it app python scripts/add_recipient.py
+
+# 6. Add DNC entries interactively (as needed)
+docker compose exec -it app python scripts/add_dnc.py
 ```
 
 When a new hail events CSV arrives (e.g., `rbi_hail_events_2026.csv`), import it
@@ -61,7 +66,7 @@ All scripts run inside the `app` container via `docker compose exec`.
 ```bash
 docker compose exec app python scripts/init_db.py
 ```
-Safe to re-run; uses `CREATE TABLE IF NOT EXISTS` throughout.
+Safe to re-run; uses `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` throughout.
 
 ### Import hail events
 ```bash
@@ -84,7 +89,13 @@ docker compose exec -it app python scripts/add_dnc.py
 ```
 Prompts for email, validates format, loops until you enter `n`.
 
-### Run the daily job manually
+### Add an internal report recipient interactively
+```bash
+docker compose exec -it app python scripts/add_recipient.py
+```
+Prompts for first name, last name, and email. Loops until you enter `n`.
+
+### Run the weekly job manually
 ```bash
 docker compose exec app python scripts/daily_job.py
 ```
@@ -135,6 +146,10 @@ The service runs `docker compose exec -T app python scripts/daily_job.py` from
 disables TTY allocation for non-interactive execution. `Persistent=true` means
 if the machine was off at 12:00 Monday, the job fires once on next boot.
 
+The service unit includes an `ExecStartPre` step that verifies the `app`
+container is running before attempting to exec into it. If the container is
+stopped, the service fails cleanly with a journal entry.
+
 ---
 
 ## How the Hail Window Works
@@ -149,6 +164,25 @@ hail_cutoff = date.today() - timedelta(days=365)
 
 New hail CSVs can be imported at any time; events enter or leave the window
 automatically as dates roll forward.
+
+---
+
+## Script Architecture
+
+```
+scripts/
+├── db.py              — DB connection factory (3-attempt retry, 5s backoff)
+├── init_db.py         — Schema DDL: tables, indexes, idempotent migrations
+├── rentcast.py        — RentCast API client (pagination + retry on 429/5xx)
+├── pipeline.py        — Per-listing processing: DNC check, upsert, insert
+├── report.py          — PDF generation via reportlab
+├── mailer.py          — Gmail SMTP sender
+├── daily_job.py       — Weekly job orchestrator (main entry point)
+├── import_hail_events.py — Bulk CSV importer for hail events
+├── import_dnc.py      — Bulk CSV importer for DNC list
+├── add_dnc.py         — Interactive single-entry DNC tool
+└── add_recipient.py   — Interactive internal email recipient manager
+```
 
 ---
 

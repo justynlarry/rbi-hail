@@ -25,14 +25,14 @@ def parse_hail_size(raw):
 
 def normalize_header(name):
     mapping = {
-        "date": "hail_date",
+        "date":      "hail_date",
         "hail_date": "hail_date",
-        "zip": "zipcode",
-        "zip code": "zipcode",
-        "zipcode": "zipcode",
-        "city": "city",
-        "state": "state",
-        "size": "hail_size",
+        "zip":       "zipcode",
+        "zip code":  "zipcode",
+        "zipcode":   "zipcode",
+        "city":      "city",
+        "state":     "state",
+        "size":      "hail_size",
         "hail_size": "hail_size",
     }
     return mapping.get(name.strip().lower(), name.strip().lower())
@@ -57,9 +57,9 @@ def main():
                     norm = {header_map.get(k, k): v for k, v in row.items()}
 
                     raw_date = norm.get("hail_date", "").strip()
-                    zipcode = norm.get("zipcode", "").strip()
-                    city = norm.get("city", "").strip() or None
-                    state = norm.get("state", "").strip() or None
+                    zipcode  = norm.get("zipcode",   "").strip()
+                    city     = norm.get("city",      "").strip() or None
+                    state    = norm.get("state",     "").strip() or None
                     hail_size = parse_hail_size(norm.get("hail_size", ""))
 
                     if not raw_date or not zipcode:
@@ -79,22 +79,20 @@ def main():
                             errors += 1
                             continue
 
-                    cur.execute(
-                        "SELECT 1 FROM hail_events WHERE hail_date = %s AND zipcode = %s",
-                        (hail_date, zipcode),
-                    )
-                    if cur.fetchone():
-                        skipped += 1
-                        continue
-
+                    # Single atomic operation — the UNIQUE(hail_date, zipcode) constraint
+                    # handles duplicates; no separate SELECT needed.
                     cur.execute(
                         """
                         INSERT INTO hail_events (hail_date, zipcode, city, state, hail_size)
                         VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (hail_date, zipcode) DO NOTHING
                         """,
                         (hail_date, zipcode, city, state, hail_size),
                     )
-                    inserted += 1
+                    if cur.rowcount:
+                        inserted += 1
+                    else:
+                        skipped += 1
 
     conn.close()
     log.info("Done: %d inserted, %d skipped (duplicate), %d errors.", inserted, skipped, errors)

@@ -1,12 +1,16 @@
 [Unit]
-Description=Hail Outreach Daily Report Job
+Description=Hail Outreach Weekly Report Job
 Documentation=https://github.com/justynlarry/hail-outreach
 Wants=network-online.target docker.service
 After=network-online.target docker.service
+ConditionPathExists=/home/rbi-user/hail-outreach/docker-compose.yml
 
 [Service]
 Type=oneshot
 WorkingDirectory=/home/rbi-user/hail-outreach
+# Verify the app container is actually running before exec'ing into it.
+# Fails cleanly with a journal entry if the container is stopped.
+ExecStartPre=/usr/bin/docker compose exec -T app true
 ExecStart=/usr/bin/docker compose exec -T app python scripts/daily_job.py
 StandardOutput=journal
 StandardError=journal
