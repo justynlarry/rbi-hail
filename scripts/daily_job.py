@@ -4,7 +4,7 @@ Daily hail outreach job.
 
 Steps:
   1. Determine pull mode (first run vs. incremental)
-  2. Get target zip codes from hail_events for REPORT_YEAR
+  2. Get target zip codes from hail_events within a rolling 365-day window
   3. Query RentCast for Active listings listed in the last 24 hours per zip
   4. Process each listing: DNC check, agent upsert, listing insert, hail event link
   5. Generate PDF report via reportlab
@@ -35,7 +35,6 @@ from db import get_conn
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-REPORT_YEAR = date.today().year - 1
 PAGE_SIZE = 500
 REPORTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "reports")
 
@@ -102,12 +101,13 @@ def fetch_listings_for_zip(zipcode, since_date):
 # ─── Listing processor ───────────────────────────────────────────────────────
 
 
-def process_listing(conn, item):
+def process_listing(conn, item, hail_cutoff):
     """
     Process a single RentCast listing. Returns True if newly inserted.
 
     All DB operations run in a single transaction per listing.
     Rolls back (and returns False) on DNC match or duplicate listing_id.
+    hail_cutoff: only link hail events on or after this date (rolling 365-day window).
     """
     agent_info = item.get("listingAgent") or {}
     agent_email = (agent_info.get("email") or "").strip().lower()
@@ -179,11 +179,11 @@ def process_listing(conn, item):
         )
         listing_id = cur.fetchone()[0]
 
-        # Link to matching hail events in REPORT_YEAR
+        # Link to hail events in the rolling 365-day window for this zip
         cur.execute(
             "SELECT id FROM hail_events"
-            " WHERE zipcode = %s AND EXTRACT(YEAR FROM hail_date) = %s",
-            (zipcode_val, REPORT_YEAR),
+            " WHERE zipcode = %s AND hail_date >= %s AND hail_date <= CURRENT_DATE",
+            (zipcode_val, hail_cutoff),
         )
         hail_rows = cur.fetchall()
         for (hail_event_id,) in hail_rows:
@@ -328,16 +328,20 @@ def main():
         since_date = last_run_at.date()
         log.info("Fetching Active listings listed on or after %s", since_date)
 
-        # Step 2 — Target zip codes from last year's hail events
+        # Step 2 — Target zip codes from hail events in the rolling 365-day window
+        hail_cutoff = date.today() - timedelta(days=365)
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT DISTINCT zipcode FROM hail_events"
-                " WHERE EXTRACT(YEAR FROM hail_date) = %s",
-                (REPORT_YEAR,),
+                " WHERE hail_date >= %s AND hail_date <= CURRENT_DATE",
+                (hail_cutoff,),
             )
             zipcodes = [r[0] for r in cur.fetchall()]
         conn.commit()
-        log.info("REPORT_YEAR=%d — %d target zip code(s)", REPORT_YEAR, len(zipcodes))
+        log.info(
+            "Hail window %s → %s — %d target zip code(s)",
+            hail_cutoff, date.today(), len(zipcodes),
+        )
 
         # Step 3 + 4 — Fetch Active listings and process (one call per zip)
         for zipcode in zipcodes:
@@ -353,7 +357,7 @@ def main():
 
             for item in listings:
                 try:
-                    if process_listing(conn, item):
+                    if process_listing(conn, item, hail_cutoff):
                         new_listings += 1
                 except Exception as exc:
                     log.warning(

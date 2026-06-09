@@ -1,9 +1,9 @@
 [Unit]
-Description=Daily Hail Outreach Timer — fires at 06:00 local time
+Description=Weekly Hail Outreach Timer — fires Monday at 12:00 local time
 Requires=hail-outreach.service
 
 [Timer]
-OnCalendar=*-*-* 06:00:00
+OnCalendar=Mon *-*-* 12:00:00
 Persistent=true
 
 [Install]
