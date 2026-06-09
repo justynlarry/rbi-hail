@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 import csv
 import logging
+import os
 import re
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from datetime import datetime
 
 from db import get_conn

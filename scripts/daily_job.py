@@ -14,7 +14,10 @@ Steps:
 import logging
 import os
 import smtplib
+import sys
 from datetime import date, datetime
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
