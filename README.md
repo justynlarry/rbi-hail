@@ -89,6 +89,23 @@ Prompts for email, validates format, loops until you enter `n`.
 docker compose exec app python scripts/daily_job.py
 ```
 
+### Kill a runaway job
+The app container is too slim for `pkill`. Use this one-liner to find and kill
+the process via bash's built-in:
+
+```bash
+docker compose exec app bash -c "kill \$(for p in /proc/[0-9]*; do grep -ql daily_job \$p/cmdline 2>/dev/null && basename \$p; done)"
+```
+
+To inspect the PIDs before killing:
+```bash
+# Find PIDs
+docker compose exec app bash -c "for p in /proc/[0-9]*; do grep -ql daily_job \$p/cmdline 2>/dev/null && echo \$(basename \$p); done"
+
+# Then kill by PID
+docker compose exec app bash -c "kill <pid1> <pid2>"
+```
+
 ---
 
 ## Systemd Timer Setup
@@ -114,24 +131,24 @@ journalctl -u hail-outreach.service -f
 ```
 
 The service runs `docker compose exec -T app python scripts/daily_job.py` from
-`/home/rbi-user/hail-outreach` each morning at 06:00 local time. The `-T` flag
+`/home/rbi-user/hail-outreach` every Monday at 12:00 local time. The `-T` flag
 disables TTY allocation for non-interactive execution. `Persistent=true` means
-if the machine was off at 06:00, the job fires once on next boot.
+if the machine was off at 12:00 Monday, the job fires once on next boot.
 
 ---
 
-## How REPORT_YEAR Works
+## How the Hail Window Works
 
-`REPORT_YEAR` is calculated at runtime in every script that needs it:
+The job targets zip codes from hail events within a rolling 365-day window
+ending today — no config needed at year rollover:
 
 ```python
-from datetime import date
-REPORT_YEAR = date.today().year - 1
+hail_cutoff = date.today() - timedelta(days=365)
+# targets: hail_date >= hail_cutoff AND hail_date <= today
 ```
 
-In 2026, `REPORT_YEAR = 2025`. In 2027, `REPORT_YEAR = 2026` — no config
-change needed at year rollover. The daily job targets zip codes from hail events
-in that year automatically.
+New hail CSVs can be imported at any time; events enter or leave the window
+automatically as dates roll forward.
 
 ---
 
