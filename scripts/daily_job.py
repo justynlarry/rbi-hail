@@ -5,7 +5,7 @@ Daily hail outreach job.
 Steps:
   1. Determine pull mode (first run vs. incremental)
   2. Get target zip codes from hail_events for REPORT_YEAR
-  3. Query RentCast for Active and Pending sale listings per zip
+  3. Query RentCast for Active listings listed in the last 24 hours per zip
   4. Process each listing: DNC check, agent upsert, listing insert, hail event link
   5. Generate PDF report via reportlab
   6. Email report to internal_email recipients via Gmail SMTP
@@ -15,7 +15,7 @@ import logging
 import os
 import smtplib
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from email.mime.application import MIMEApplication
@@ -43,8 +43,13 @@ REPORTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "re
 # ─── RentCast ────────────────────────────────────────────────────────────────
 
 
-def fetch_listings_for_zip(zipcode, status, last_run_at):
-    """Fetch all listings for a zip/status, paginating until exhausted."""
+def fetch_listings_for_zip(zipcode, since_date):
+    """Fetch Active listings for a zip listed on or after since_date.
+
+    Paginates only as long as results keep appearing. Stops early if a full
+    page contains no listings newer than since_date (RentCast returns newest
+    first), avoiding runaway pagination on large zip codes.
+    """
     url = "https://api.rentcast.io/v1/listings/sale"
     headers = {"X-Api-Key": os.environ["RENTCAST_API_KEY"]}
     offset = 0
@@ -54,7 +59,12 @@ def fetch_listings_for_zip(zipcode, status, last_run_at):
         resp = requests.get(
             url,
             headers=headers,
-            params={"zipCode": zipcode, "status": status, "limit": PAGE_SIZE, "offset": offset},
+            params={
+                "zipCode": zipcode,
+                "status": "Active",
+                "limit": PAGE_SIZE,
+                "offset": offset,
+            },
             timeout=30,
         )
         resp.raise_for_status()
@@ -62,21 +72,26 @@ def fetch_listings_for_zip(zipcode, status, last_run_at):
         if not isinstance(page, list) or not page:
             break
 
-        if last_run_at:
-            for item in page:
-                raw = item.get("listedDate") or item.get("listingDate") or ""
-                if raw:
-                    try:
-                        listed = datetime.fromisoformat(raw[:10]).date()
-                        if listed >= last_run_at.date():
-                            results.append(item)
-                    except ValueError:
+        page_had_match = False
+        for item in page:
+            raw = item.get("listedDate") or item.get("listingDate") or ""
+            if raw:
+                try:
+                    listed = datetime.fromisoformat(raw[:10]).date()
+                    if listed >= since_date:
                         results.append(item)
-                else:
+                        page_had_match = True
+                except ValueError:
                     results.append(item)
-        else:
-            results.extend(page)
+                    page_had_match = True
+            else:
+                # No date on listing — include it and let dedup handle it
+                results.append(item)
+                page_had_match = True
 
+        # If an entire page had nothing newer than our cutoff, stop paginating
+        if not page_had_match:
+            break
         if len(page) < PAGE_SIZE:
             break
         offset += PAGE_SIZE
@@ -127,27 +142,21 @@ def process_listing(conn, item):
             log.debug("DNC skip: %s", agent_email)
             return False
 
-        # Agent upsert — write name/brokerage on INSERT only, never UPDATE
+        # Agent upsert — name/brokerage written on INSERT only, counter always incremented.
+        # ON CONFLICT handles the case where a prior partial run already inserted this agent,
+        # eliminating the SELECT-then-INSERT race that caused duplicate key violations.
         cur.execute(
-            "SELECT id FROM agents WHERE LOWER(agent_email) = %s",
-            (agent_email,),
+            """
+            INSERT INTO agents (agent_name, agent_email, brokerage)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (agent_email) DO UPDATE
+                SET agent_number_properties_listed =
+                    agents.agent_number_properties_listed + 1
+            RETURNING id
+            """,
+            (agent_name, agent_email, brokerage),
         )
-        row = cur.fetchone()
-        if row:
-            agent_id = row[0]
-            cur.execute(
-                "UPDATE agents"
-                " SET agent_number_properties_listed = agent_number_properties_listed + 1"
-                " WHERE id = %s",
-                (agent_id,),
-            )
-        else:
-            cur.execute(
-                "INSERT INTO agents (agent_name, agent_email, brokerage)"
-                " VALUES (%s, %s, %s) RETURNING id",
-                (agent_name, agent_email, brokerage),
-            )
-            agent_id = cur.fetchone()[0]
+        agent_id = cur.fetchone()[0]
 
         # Listing dedup — skip (and roll back agent counter) if already imported
         cur.execute(
@@ -307,7 +316,7 @@ def main():
     new_listings = 0
 
     try:
-        # Step 1 — Determine pull mode
+        # Step 1 — Determine lookback window (last successful run, or 24 hours ago)
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT run_at FROM job_runs WHERE status = 'success'"
@@ -315,12 +324,9 @@ def main():
             )
             row = cur.fetchone()
         conn.commit()
-        last_run_at = row[0] if row else None
-
-        if last_run_at:
-            log.info("Incremental run — fetching listings since %s", last_run_at)
-        else:
-            log.info("First run — fetching all available listings.")
+        last_run_at = row[0] if row else datetime.now() - timedelta(hours=24)
+        since_date = last_run_at.date()
+        log.info("Fetching Active listings listed on or after %s", since_date)
 
         # Step 2 — Target zip codes from last year's hail events
         with conn.cursor() as cur:
@@ -333,29 +339,26 @@ def main():
         conn.commit()
         log.info("REPORT_YEAR=%d — %d target zip code(s)", REPORT_YEAR, len(zipcodes))
 
-        # Step 3 + 4 — Fetch and process listings
+        # Step 3 + 4 — Fetch Active listings and process (one call per zip)
         for zipcode in zipcodes:
-            for status in ("Active", "Pending"):
+            try:
+                listings = fetch_listings_for_zip(zipcode, since_date)
+            except requests.RequestException as exc:
+                log.warning("RentCast error zip=%s: %s", zipcode, exc)
+                continue
+
+            listings_found += len(listings)
+            if listings:
+                log.info("zip=%s — %d listing(s)", zipcode, len(listings))
+
+            for item in listings:
                 try:
-                    listings = fetch_listings_for_zip(zipcode, status, last_run_at)
-                except requests.RequestException as exc:
+                    if process_listing(conn, item):
+                        new_listings += 1
+                except Exception as exc:
                     log.warning(
-                        "RentCast error zip=%s status=%s: %s", zipcode, status, exc
+                        "Error processing listing id=%s: %s", item.get("id"), exc
                     )
-                    continue
-
-                listings_found += len(listings)
-                if listings:
-                    log.info("zip=%s status=%s — %d listing(s)", zipcode, status, len(listings))
-
-                for item in listings:
-                    try:
-                        if process_listing(conn, item):
-                            new_listings += 1
-                    except Exception as exc:
-                        log.warning(
-                            "Error processing listing id=%s: %s", item.get("id"), exc
-                        )
 
         log.info("Totals: %d listings found, %d newly inserted.", listings_found, new_listings)
 
